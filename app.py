@@ -144,7 +144,7 @@ with col_input2:
 
 col_opt1, col_opt2 = st.columns([1, 3])
 with col_opt1:
-    step_km = st.number_input("Bölüm Mesafesi (km)", value=10.75, step=0.25, format="%.2f")
+    step_km = st.number_input("Bölüm Mesafesi (km)", value=11.75, step=0.25, format="%.2f")
 with col_opt2:
     st.write("") 
     st.write("") 
@@ -264,3 +264,4 @@ if st.session_state.harita_verisi is not None:
     c1.metric("Toplam Mesafe", f"{data['total_km']:.2f} km")
     c2.metric("Mola Sayısı", f"{len(data['detailed_breaks'])}")
     c3.metric("Son Kalan Parça", f"{data['segments'][-1]:.2f} km" if data['segments'] else "0")
+
