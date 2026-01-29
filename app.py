@@ -15,7 +15,7 @@ except Exception:
     st.error("🚨 API Anahtarı Bulunamadı! Lütfen secrets.toml dosyasını kontrol edin.")
     st.stop()
 
-# ---- 1. ADRES FONKSİYONLARI ----
+# ---- 1. ADRES ve PLUS CODE FONKSİYONLARI ----
 
 def get_coordinates(address):
     """Metin halindeki adresi koordinata çevirir."""
@@ -38,8 +38,8 @@ def get_coordinates(address):
     except Exception as e:
         return None, str(e)
 
-def get_address_from_coords(lat, lng):
-    """Koordinattan açık adres bulur (Reverse Geocoding)."""
+def get_plus_code(lat, lng):
+    """Koordinattan Google Plus Code (Ör: QRR4+CM Gölbaşı) bulur."""
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {
         "latlng": f"{lat},{lng}",
@@ -49,12 +49,21 @@ def get_address_from_coords(lat, lng):
     try:
         r = requests.get(url, params=params)
         data = r.json()
-        if data['status'] == 'OK':
-            # İlk sonuç genelde en doğru olandır
-            return data['results'][0]['formatted_address']
-        return "Bilinmeyen Konum"
+        
+        # API cevabında 'plus_code' alanı varsa onu al
+        if data.get('status') == 'OK':
+            if 'plus_code' in data:
+                # compound_code: Şehir ismiyle birlikte (Ör: QRR4+CM Gölbaşı, Ankara)
+                return data['plus_code'].get('compound_code', data['plus_code'].get('global_code'))
+            
+            # Eğer ana dizinde yoksa, results içindeki ilk elemana bakalım
+            if data.get('results') and 'plus_code' in data['results'][0]:
+                 return data['results'][0]['plus_code'].get('compound_code')
+
+        # Hiçbiri yoksa ham koordinat döndür
+        return f"{lat:.6f}, {lng:.6f}"
     except:
-        return "Adres alınamadı"
+        return f"{lat:.6f}, {lng:.6f}"
 
 # ---- 2. MATEMATİKSEL HESAPLAMALAR ----
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -129,8 +138,8 @@ def get_directions_polyline(origin_lat, origin_lng, dest_lat, dest_lng):
     return pts, None
 
 # ---- ARAYÜZ (UI) ----
-st.title("📍 Akıllı Rota Bölücü")
-st.markdown("A ve B noktalarını girin, rota mola yerlerini ve açık adreslerini göstersin.")
+st.title("📍 Akıllı Rota Bölücü (Plus Code)")
+st.markdown("A ve B noktalarını girin, rota tam olarak belirlediğiniz kilometrelerde bölünsün.")
 
 # --- Session State (Hafıza) ---
 if "harita_verisi" not in st.session_state:
@@ -144,6 +153,7 @@ with col_input2:
 
 col_opt1, col_opt2 = st.columns([1, 3])
 with col_opt1:
+    # Kullanıcının istediği varsayılan değer 11.75
     step_km = st.number_input("Bölüm Mesafesi (km)", value=11.75, step=0.25, format="%.2f")
 with col_opt2:
     st.write("") 
@@ -155,7 +165,7 @@ if hesapla_btn:
     if not origin_text or not dest_text:
         st.warning("Lütfen adresleri girin.")
     else:
-        with st.spinner("Rota hesaplanıyor ve mola adresleri bulunuyor..."):
+        with st.spinner("Rota hesaplanıyor ve Plus Code'lar bulunuyor..."):
             # 1. Koordinatları Bul
             origin_data, err1 = get_coordinates(origin_text)
             dest_data, err2 = get_coordinates(dest_text)
@@ -175,36 +185,33 @@ if hesapla_btn:
                     # 3. Rotayı Böl
                     total_km, segments, breaks = split_route_by_step_km(pts, step_km)
                     
-                    # 4. Mola Adreslerini Çek (YENİ ÖZELLİK)
+                    # 4. Mola Adreslerini (PLUS CODE) Çek
                     detailed_breaks = []
                     progress_text = st.empty()
-                    
-                    # Kullanıcı beklerken sıkılmasın diye ilerleme çubuğu
                     prog_bar = st.progress(0)
                     
                     for i, bp in enumerate(breaks):
-                        # Adresi API'den sor
-                        addr = get_address_from_coords(bp[0], bp[1])
+                        # BURADA DEĞİŞİKLİK YAPILDI: Plus Code soruluyor
+                        p_code = get_plus_code(bp[0], bp[1])
                         current_km = step_km * (i + 1)
                         
                         detailed_breaks.append({
                             "lat": bp[0],
                             "lng": bp[1],
-                            "address": addr,
+                            "code": p_code,
                             "km": current_km
                         })
                         
-                        # İlerlemeyi güncelle
                         prog_bar.progress((i + 1) / len(breaks))
                     
-                    prog_bar.empty() # İş bitince çubuğu kaldır
+                    prog_bar.empty()
                     
                     # 5. Verileri HAFIZAYA Kaydet
                     st.session_state.harita_verisi = {
                         "pts": pts,
                         "origin": origin_data,
                         "dest": dest_data,
-                        "detailed_breaks": detailed_breaks, # Artık sadece koordinat değil, adres de var
+                        "detailed_breaks": detailed_breaks,
                         "total_km": total_km,
                         "segments": segments,
                         "step_km": step_km
@@ -216,52 +223,51 @@ if st.session_state.harita_verisi is not None:
     
     st.success(f"Rota: {data['origin']['name']} ➝ {data['dest']['name']}")
 
-    # Harita oluştur
     mid_idx = len(data['pts']) // 2
     m = folium.Map(location=[data['pts'][mid_idx][0], data['pts'][mid_idx][1]], zoom_start=9)
 
-    # Rota Çizgisi
     folium.PolyLine(data['pts'], color="blue", weight=5, opacity=0.7).add_to(m)
 
-    # Başlangıç
     folium.Marker(
         [data['origin']['lat'], data['origin']['lng']], 
         popup=f"<b>Başlangıç</b><br>{data['origin']['name']}",
         icon=folium.Icon(color="green", icon="play")
     ).add_to(m)
 
-    # Bitiş
     folium.Marker(
         [data['dest']['lat'], data['dest']['lng']], 
         popup=f"<b>Varış</b><br>{data['dest']['name']}",
         icon=folium.Icon(color="red", icon="stop")
     ).add_to(m)
 
-    # Mola Noktaları (Adresli)
+    # Mola Noktaları (Plus Code Gösterimi)
     for i, info in enumerate(data['detailed_breaks']):
-        # HTML ile popup'ı güzelleştirelim
+        # Popup içeriği Plus Code'u öne çıkaracak şekilde düzenlendi
         popup_html = f"""
-        <div style="width:200px">
-            <b>{i+1}. Mola Noktası</b><br>
-            <i>{info['km']:.2f}. Kilometre</i><br>
-            <hr style="margin:5px 0">
-            {info['address']}
+        <div style="width:220px; font-family:sans-serif;">
+            <b style="color:#e65100;">{i+1}. Mola Noktası</b><br>
+            <span style="font-size:12px; color:#555;">{info['km']:.2f}. Kilometre</span>
+            <hr style="margin:5px 0; border:0; border-top:1px solid #ccc;">
+            <div style="background-color:#f0f0f0; padding:5px; border-radius:4px; font-weight:bold; font-size:14px; text-align:center;">
+                {info['code']}
+            </div>
+            <div style="font-size:10px; color:#888; margin-top:3px; text-align:center;">
+                (Google Maps'te aratılabilir)
+            </div>
         </div>
         """
         
         folium.Marker(
             [info['lat'], info['lng']],
             popup=folium.Popup(popup_html, max_width=300),
-            icon=folium.Icon(color="orange", icon="info-sign")
+            icon=folium.Icon(color="orange", icon="map-marker")
         ).add_to(m)
 
     m.fit_bounds([[p[0], p[1]] for p in data['pts']])
 
     st_folium(m, height=500, use_container_width=True)
 
-    # İstatistikler
     c1, c2, c3 = st.columns(3)
     c1.metric("Toplam Mesafe", f"{data['total_km']:.2f} km")
     c2.metric("Mola Sayısı", f"{len(data['detailed_breaks'])}")
     c3.metric("Son Kalan Parça", f"{data['segments'][-1]:.2f} km" if data['segments'] else "0")
-
