@@ -1,4 +1,5 @@
 streamlit
 requests
 polyline
-pydeck
+folium
+streamlit-folium
