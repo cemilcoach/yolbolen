@@ -2,7 +2,8 @@ import math
 import requests
 import streamlit as st
 import polyline
-import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
 
 # ---- Sayfa Ayarları ----
 st.set_page_config(page_title="Rota Bölücü PRO", layout="wide")
@@ -11,17 +12,16 @@ st.set_page_config(page_title="Rota Bölücü PRO", layout="wide")
 try:
     API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
 except Exception:
-    st.error("🚨 API Anahtarı Bulunamadı!")
+    st.error("🚨 API Anahtarı Bulunamadı! Lütfen secrets.toml dosyasını kontrol edin.")
     st.stop()
 
 # ---- 1. ADRESİ KOORDİNATA ÇEVİRME (GEOCODING) ----
 def get_coordinates(address):
-    """Metin halindeki adresi (Ör: Ankara) enlem/boylama çevirir."""
     if not address:
         return None, "Adres girilmedi."
-        
+    
     url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": address, "key": API_KEY}
+    params = {"address": address, "key": API_KEY, "language": "tr"}
     
     try:
         r = requests.get(url, params=params)
@@ -36,7 +36,7 @@ def get_coordinates(address):
     except Exception as e:
         return None, str(e)
 
-# ---- 2. ROTA ÇİZME VE PARÇALAMA FONKSİYONLARI ----
+# ---- 2. MATEMATİKSEL HESAPLAMALAR ----
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     p1 = math.radians(lat1)
@@ -112,12 +112,11 @@ def get_directions_polyline(origin_lat, origin_lng, dest_lat, dest_lng):
 st.title("📍 Akıllı Rota Bölücü")
 st.markdown("A ve B noktalarını girin, rota tam olarak belirlediğiniz kilometrelerde bölünsün.")
 
-# Basit ve Sağlam Input Kutuları
 col_input1, col_input2 = st.columns(2)
 with col_input1:
-    origin_text = st.text_input("A Noktası (Başlangıç)", placeholder="Ör: Ankara, Kızılay")
+    origin_text = st.text_input("A Noktası (Başlangıç)", placeholder="Ör: Kızılay, Ankara")
 with col_input2:
-    dest_text = st.text_input("B Noktası (Varış)", placeholder="Ör: İstanbul, Taksim")
+    dest_text = st.text_input("B Noktası (Varış)", placeholder="Ör: Taksim, İstanbul")
 
 col_opt1, col_opt2 = st.columns([1, 3])
 with col_opt1:
@@ -125,25 +124,21 @@ with col_opt1:
 with col_opt2:
     st.write("") 
     st.write("") 
-    # Butonu biraz aşağı hizalamak için boşluk
-    hesapla_btn = st.button("Rotayı Hesapla ve Böl", type="primary", use_container_width=True)
+    hesapla_btn = st.button("Rotayı Hesapla ve Göster", type="primary", use_container_width=True)
 
-# ---- HESAPLAMA MANTIĞI ----
 if hesapla_btn:
     if not origin_text or not dest_text:
-        st.warning("Lütfen hem başlangıç hem de varış noktalarını yazın.")
+        st.warning("Lütfen adresleri girin.")
     else:
-        with st.spinner("Adresler bulunuyor ve rota hesaplanıyor..."):
-            # 1. Adresleri Koordinata Çevir
+        with st.spinner("Rota hesaplanıyor..."):
+            # 1. Koordinatları Bul
             origin_data, err1 = get_coordinates(origin_text)
             dest_data, err2 = get_coordinates(dest_text)
 
-            if err1:
-                st.error(f"A Noktası Hatası: {err1}")
-            elif err2:
-                st.error(f"B Noktası Hatası: {err2}")
+            if err1 or err2:
+                st.error(f"Adres hatası: {err1 or err2}")
             else:
-                st.success(f"Rota: **{origin_data['name']}** ➡️ **{dest_data['name']}**")
+                st.success(f"Rota: {origin_data['name']} ➝ {dest_data['name']}")
                 
                 # 2. Rotayı Çiz
                 pts, route_err = get_directions_polyline(
@@ -157,45 +152,42 @@ if hesapla_btn:
                     # 3. Rotayı Böl
                     total_km, segments, breaks = split_route_by_step_km(pts, step_km)
 
-                    # --- HARİTA GÖRSELLEŞTİRME ---
-                    path_layer_data = [{"path": [[p[1], p[0]] for p in pts]}]
-                    
-                    points_layer_data = []
-                    # Başlangıç
-                    points_layer_data.append({"lng": origin_data['lng'], "lat": origin_data['lat'], "tooltip": f"Başlangıç: {origin_data['name']}", "color": [0, 200, 0], "radius": 300})
-                    
-                    # Duraklar
-                    for i, bp in enumerate(breaks):
-                        points_layer_data.append({
-                            "lng": bp[1], 
-                            "lat": bp[0], 
-                            "tooltip": f"{i+1}. Mola ({step_km * (i+1):.2f} km)",
-                            "color": [255, 140, 0], # Turuncu
-                            "radius": 200
-                        })
-                    
-                    # Varış
-                    points_layer_data.append({"lng": dest_data['lng'], "lat": dest_data['lat'], "tooltip": f"Varış: {dest_data['name']}", "color": [200, 0, 0], "radius": 300})
-
+                    # ---- HARİTA (FOLIUM) ----
+                    # Harita merkezini rotanın ortasına ayarla
                     mid_idx = len(pts) // 2
-                    view_state = pdk.ViewState(latitude=pts[mid_idx][0], longitude=pts[mid_idx][1], zoom=6, pitch=0)
+                    m = folium.Map(location=[pts[mid_idx][0], pts[mid_idx][1]], zoom_start=10)
 
-                    layer_path = pdk.Layer(
-                        "PathLayer", path_layer_data, get_path="path", width_scale=20, width_min_pixels=4, get_color=[50, 100, 200], pickable=True
-                    )
-                    
-                    layer_scatter = pdk.Layer(
-                        "ScatterplotLayer", points_layer_data, get_position="[lng, lat]", get_color="color", get_radius="radius", pickable=True, radius_min_pixels=5, filled=True
-                    )
+                    # Rotayı Mavi Çizgi Olarak Ekle
+                    folium.PolyLine(pts, color="blue", weight=5, opacity=0.7).add_to(m)
 
-                    st.pydeck_chart(pdk.Deck(
-                        layers=[layer_path, layer_scatter],
-                        initial_view_state=view_state,
-                        map_style="mapbox://styles/mapbox/light-v10",
-                        tooltip={"text": "{tooltip}"}
-                    ))
+                    # Başlangıç ve Bitiş İşaretçileri
+                    folium.Marker(
+                        [origin_data['lat'], origin_data['lng']], 
+                        popup=f"Başlangıç: {origin_data['name']}",
+                        icon=folium.Icon(color="green", icon="play")
+                    ).add_to(m)
 
-                    # İstatistikler
+                    folium.Marker(
+                        [dest_data['lat'], dest_data['lng']], 
+                        popup=f"Varış: {dest_data['name']}",
+                        icon=folium.Icon(color="red", icon="stop")
+                    ).add_to(m)
+
+                    # Ara Durakları Ekle (Turuncu)
+                    for i, bp in enumerate(breaks):
+                        folium.Marker(
+                            [bp[0], bp[1]],
+                            popup=f"{i+1}. Mola ({step_km * (i+1):.2f} km)",
+                            icon=folium.Icon(color="orange", icon="info-sign")
+                        ).add_to(m)
+
+                    # Haritayı rotaya sığdır
+                    m.fit_bounds([[p[0], p[1]] for p in pts])
+
+                    # Haritayı Ekrana Bas
+                    st_folium(m, width=1200, height=500)
+
+                    # İstatistikleri Göster
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Toplam Mesafe", f"{total_km:.2f} km")
                     c2.metric("Mola Sayısı", f"{len(breaks)}")
