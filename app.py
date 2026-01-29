@@ -15,8 +15,10 @@ except Exception:
     st.error("🚨 API Anahtarı Bulunamadı! Lütfen secrets.toml dosyasını kontrol edin.")
     st.stop()
 
-# ---- 1. ADRESİ KOORDİNATA ÇEVİRME (GEOCODING) ----
+# ---- 1. ADRES FONKSİYONLARI ----
+
 def get_coordinates(address):
+    """Metin halindeki adresi koordinata çevirir."""
     if not address:
         return None, "Adres girilmedi."
     
@@ -35,6 +37,24 @@ def get_coordinates(address):
             return None, f"Adres bulunamadı ({data['status']})"
     except Exception as e:
         return None, str(e)
+
+def get_address_from_coords(lat, lng):
+    """Koordinattan açık adres bulur (Reverse Geocoding)."""
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {
+        "latlng": f"{lat},{lng}",
+        "key": API_KEY,
+        "language": "tr"
+    }
+    try:
+        r = requests.get(url, params=params)
+        data = r.json()
+        if data['status'] == 'OK':
+            # İlk sonuç genelde en doğru olandır
+            return data['results'][0]['formatted_address']
+        return "Bilinmeyen Konum"
+    except:
+        return "Adres alınamadı"
 
 # ---- 2. MATEMATİKSEL HESAPLAMALAR ----
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -110,9 +130,9 @@ def get_directions_polyline(origin_lat, origin_lng, dest_lat, dest_lng):
 
 # ---- ARAYÜZ (UI) ----
 st.title("📍 Akıllı Rota Bölücü")
-st.markdown("A ve B noktalarını girin, rota tam olarak belirlediğiniz kilometrelerde bölünsün.")
+st.markdown("A ve B noktalarını girin, rota mola yerlerini ve açık adreslerini göstersin.")
 
-# --- Session State Başlatma (Hafıza) ---
+# --- Session State (Hafıza) ---
 if "harita_verisi" not in st.session_state:
     st.session_state.harita_verisi = None
 
@@ -135,7 +155,7 @@ if hesapla_btn:
     if not origin_text or not dest_text:
         st.warning("Lütfen adresleri girin.")
     else:
-        with st.spinner("Rota hesaplanıyor..."):
+        with st.spinner("Rota hesaplanıyor ve mola adresleri bulunuyor..."):
             # 1. Koordinatları Bul
             origin_data, err1 = get_coordinates(origin_text)
             dest_data, err2 = get_coordinates(dest_text)
@@ -155,20 +175,42 @@ if hesapla_btn:
                     # 3. Rotayı Böl
                     total_km, segments, breaks = split_route_by_step_km(pts, step_km)
                     
-                    # 4. Verileri HAFIZAYA (Session State) Kaydet
+                    # 4. Mola Adreslerini Çek (YENİ ÖZELLİK)
+                    detailed_breaks = []
+                    progress_text = st.empty()
+                    
+                    # Kullanıcı beklerken sıkılmasın diye ilerleme çubuğu
+                    prog_bar = st.progress(0)
+                    
+                    for i, bp in enumerate(breaks):
+                        # Adresi API'den sor
+                        addr = get_address_from_coords(bp[0], bp[1])
+                        current_km = step_km * (i + 1)
+                        
+                        detailed_breaks.append({
+                            "lat": bp[0],
+                            "lng": bp[1],
+                            "address": addr,
+                            "km": current_km
+                        })
+                        
+                        # İlerlemeyi güncelle
+                        prog_bar.progress((i + 1) / len(breaks))
+                    
+                    prog_bar.empty() # İş bitince çubuğu kaldır
+                    
+                    # 5. Verileri HAFIZAYA Kaydet
                     st.session_state.harita_verisi = {
                         "pts": pts,
                         "origin": origin_data,
                         "dest": dest_data,
-                        "breaks": breaks,
+                        "detailed_breaks": detailed_breaks, # Artık sadece koordinat değil, adres de var
                         "total_km": total_km,
                         "segments": segments,
                         "step_km": step_km
                     }
 
-# ---- HARİTA GÖSTERİMİ (Hafızadan Okur) ----
-# Bu kısım butonun içinde DEĞİL, dışındadır. Böylece sayfa yenilense de çalışır.
-
+# ---- HARİTA GÖSTERİMİ ----
 if st.session_state.harita_verisi is not None:
     data = st.session_state.harita_verisi
     
@@ -176,7 +218,7 @@ if st.session_state.harita_verisi is not None:
 
     # Harita oluştur
     mid_idx = len(data['pts']) // 2
-    m = folium.Map(location=[data['pts'][mid_idx][0], data['pts'][mid_idx][1]], zoom_start=10)
+    m = folium.Map(location=[data['pts'][mid_idx][0], data['pts'][mid_idx][1]], zoom_start=9)
 
     # Rota Çizgisi
     folium.PolyLine(data['pts'], color="blue", weight=5, opacity=0.7).add_to(m)
@@ -184,33 +226,41 @@ if st.session_state.harita_verisi is not None:
     # Başlangıç
     folium.Marker(
         [data['origin']['lat'], data['origin']['lng']], 
-        popup=f"Başlangıç: {data['origin']['name']}",
+        popup=f"<b>Başlangıç</b><br>{data['origin']['name']}",
         icon=folium.Icon(color="green", icon="play")
     ).add_to(m)
 
     # Bitiş
     folium.Marker(
         [data['dest']['lat'], data['dest']['lng']], 
-        popup=f"Varış: {data['dest']['name']}",
+        popup=f"<b>Varış</b><br>{data['dest']['name']}",
         icon=folium.Icon(color="red", icon="stop")
     ).add_to(m)
 
-    # Mola Noktaları
-    for i, bp in enumerate(data['breaks']):
+    # Mola Noktaları (Adresli)
+    for i, info in enumerate(data['detailed_breaks']):
+        # HTML ile popup'ı güzelleştirelim
+        popup_html = f"""
+        <div style="width:200px">
+            <b>{i+1}. Mola Noktası</b><br>
+            <i>{info['km']:.2f}. Kilometre</i><br>
+            <hr style="margin:5px 0">
+            {info['address']}
+        </div>
+        """
+        
         folium.Marker(
-            [bp[0], bp[1]],
-            popup=f"{i+1}. Mola ({data['step_km'] * (i+1):.2f} km)",
+            [info['lat'], info['lng']],
+            popup=folium.Popup(popup_html, max_width=300),
             icon=folium.Icon(color="orange", icon="info-sign")
         ).add_to(m)
 
-    # Harita sınırlarını ayarla
     m.fit_bounds([[p[0], p[1]] for p in data['pts']])
 
-    # Haritayı Göster (width parametresi responsive olması için kaldırıldı veya 700 civarı yapılabilir)
     st_folium(m, height=500, use_container_width=True)
 
     # İstatistikler
     c1, c2, c3 = st.columns(3)
     c1.metric("Toplam Mesafe", f"{data['total_km']:.2f} km")
-    c2.metric("Mola Sayısı", f"{len(data['breaks'])}")
+    c2.metric("Mola Sayısı", f"{len(data['detailed_breaks'])}")
     c3.metric("Son Kalan Parça", f"{data['segments'][-1]:.2f} km" if data['segments'] else "0")
